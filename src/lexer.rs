@@ -1,4 +1,5 @@
-use super::token::Token;
+use super::token::{TimeUnits, Token, TokenError, Weekdays};
+use std::str;
 
 pub trait Lexer {
     fn next_token(&mut self) -> Option<Token>;
@@ -9,111 +10,248 @@ pub trait LexerFactory {
 }
 
 pub struct DatetokenLexer<'token> {
-    token: &'token str,
+    token: &'token [u8],
+    current_char: Option<&'token u8>,
     current_pos: usize,
     next_pos: usize,
 }
 
+fn is_digit(n: &u8) -> bool {
+    return n >= &48 && n <= &57;
+}
+
+fn is_letter(n: &u8) -> bool {
+    return (n >= &97 && n <= &122) || (n >= &65 && n <= &90);
+}
+
 impl<'token> DatetokenLexer<'token> {
-    pub fn new(token: &'token str) -> Self {
-        Self {
-            token,
-            current_pos: 0,
-            next_pos: 0,
+    pub fn new(token: &'token str) -> Result<Self, TokenError> {
+        let bts = token.trim().as_bytes();
+        if bts.len() < 3 {
+            return Err(TokenError);
         }
+        let mut lexer = Self {
+            token: bts,
+            current_char: None,
+            next_pos: 0,
+            current_pos: 0,
+        };
+        lexer.read_char();
+        Ok(lexer)
+    }
+
+    fn read_char(&mut self) {
+        if self.next_pos < self.token.len() {
+            self.current_char = Some(&self.token[self.next_pos]);
+        } else {
+            self.current_char = None;
+        }
+        self.current_pos = self.next_pos;
+        self.next_pos += 1;
     }
 
     fn read_number(&mut self) -> Option<u16> {
         let pos = self.current_pos;
-        match &self.token.get(pos..) {
-            Some(sub_slice) => {
-                let mut end = sub_slice.len();
-                for (i, ch) in sub_slice.chars().enumerate() {
-                    if !ch.is_numeric() {
-                        end = i;
-                        break;
-                    }
+        loop {
+            if let Some(ch) = self.current_char {
+                if !is_digit(ch) {
+                    break;
                 }
-                if let Ok(number) = &sub_slice[pos..end].parse::<u16>() {
-                    Some(*number)
-                } else {
-                    None
+                self.read_char();
+            } else {
+                break;
+            }
+        }
+
+        if let Some(payload) = self.token.get(pos..self.current_pos) {
+            if let Ok(number_slice) = str::from_utf8(payload) {
+                if let Ok(number) = number_slice.parse::<u16>() {
+                    return Some(number);
                 }
             }
-            None => None,
         }
+        None
     }
 
     fn read_word(&mut self) -> Option<&str> {
         let pos = self.current_pos;
-        match &self.token.get(pos..) {
-            Some(sub_slice) => {
-                for (i, ch) in sub_slice.chars().enumerate() {
-                    if !ch.is_ascii_alphabetic() {
-                        return Some(&sub_slice[pos..i]);
-                    }
+        loop {
+            if let Some(ch) = self.current_char {
+                if !is_letter(ch) {
+                    break;
                 }
-                Some(&sub_slice[..])
+                self.read_char();
+            } else {
+                break;
             }
-            None => None,
         }
+        if let Some(payload) = self.token.get(pos..self.current_pos) {
+            if let Ok(slice) = str::from_utf8(payload) {
+                return Some(slice);
+            }
+        }
+        None
     }
 
     pub fn next_token(&mut self) -> Option<Token> {
-        if self.current_pos >= self.token.len() {
-            return None;
-        }
-        let pos = self.current_pos;
-        let next_pos = self.current_pos + 1;
-        match self.token.get(pos..next_pos) {
+        let token = match self.current_char {
             Some(part) => match part {
-                "n" => match self.read_word() {
-                    Some("now") => Some(Token::Now),
-                    _ => None,
+                b'n' => match self.read_word() {
+                    Some("now") => return Some(Token::Now),
+                    _ => return Some(Token::Illegal(part.to_string())),
                 },
-                _ => match part.chars().next() {
-                    Some(ch) => {
-                        if ch.is_numeric() {
-                            return match self.read_number() {
-                                Some(n) => Some(Token::Number(n)),
-                                None => Some(Token::Illegal(part.to_string())),
-                            };
+                b'/' => Some(Token::SnapBegin),
+                b'@' => Some(Token::SnapEnd),
+                b'+' => Some(Token::Add),
+                b'-' => Some(Token::Sub),
+                _ => {
+                    if is_digit(part) {
+                        if let Some(n) = self.read_number() {
+                            return Some(Token::Number(n));
                         }
-                        None
                     }
-                    None => None,
-                },
+                    if is_letter(part) {
+                        if let Some(word) = self.read_word() {
+                            if let Ok(t) = word.parse::<Token>() {
+                                return Some(t);
+                            } else {
+                                return Some(Token::Illegal(word.to_string()));
+                            }
+                        }
+                    }
+
+                    None
+                }
             },
-            None => None,
-        }
+            None => {
+                if let Ok(payload) = str::from_utf8(&self.token) {
+                    return Some(Token::Illegal(payload.to_string()));
+                }
+                None
+            }
+        };
+
+        self.read_char();
+        return token;
     }
 }
 
-pub struct DatetokenLexerFactory;
-
-impl DatetokenLexerFactory {
-    pub fn new_lexer(token: &str) -> DatetokenLexer {
-        DatetokenLexer::new(token)
-    }
-}
+//pub struct DatetokenLexerFactory;
+//
+//impl DatetokenLexerFactory {
+//    pub fn new_lexer(token: &str) -> DatetokenLexer {
+//        DatetokenLexer::new(token)
+//    }
+//}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn lexes_now_token() {
-        let mut lexer = DatetokenLexer::new("now");
-        let expected_tokens: [Token; 1] = [Token::Now];
-        for expected_token in &expected_tokens {
-            let next_token = lexer.next_token();
-            dbg!(&expected_token);
-            dbg!(&next_token);
-            if next_token.is_some() {
-                assert_eq!(*expected_token, next_token.unwrap());
-            } else {
-                assert!(false, "unexpected token error, want {}", &expected_token);
+    fn lexes_token() {
+        match DatetokenLexer::new("now/w+1d-3h@M-9s") {
+            Ok(mut lexer) => {
+                let expected_tokens: &[Token] = &[
+                    Token::Now,
+                    Token::SnapBegin,
+                    Token::Unit(TimeUnits::Week),
+                    Token::Add,
+                    Token::Number(1),
+                    Token::Unit(TimeUnits::Day),
+                    Token::Sub,
+                    Token::Number(3),
+                    Token::Unit(TimeUnits::Hour),
+                    Token::SnapEnd,
+                    Token::Unit(TimeUnits::Month),
+                    Token::Sub,
+                    Token::Number(9),
+                    Token::Unit(TimeUnits::Sec),
+                ];
+                for expected_token in expected_tokens.iter() {
+                    let next_token = lexer.next_token();
+                    if next_token.is_some() {
+                        assert_eq!(*expected_token, next_token.unwrap());
+                    } else {
+                        assert!(false, "unexpected token error, want {}", &expected_token);
+                    }
+                }
+            }
+            Err(err) => {
+                assert_eq!(None, Some(err));
+            }
+        };
+    }
+
+    #[test]
+    fn lexes_no_token() {
+        let res = DatetokenLexer::new("");
+
+        if res.is_ok() {
+            assert_eq!(Some(TokenError), None)
+        }
+    }
+
+    #[test]
+    fn lexes_number() {
+        match DatetokenLexer::new("123") {
+            Ok(mut lexer) => {
+                let next_token = lexer.next_token();
+                if next_token.is_some() {
+                    assert_eq!(Token::Number(123), next_token.unwrap());
+                } else {
+                    assert!(false, "unexpected token error, want Token::illegal");
+                }
+            }
+            Err(err) => {
+                assert_eq!(None, Some(err));
             }
         }
-        //assert_eq!(2 + 2, 4);
+    }
+
+    #[test]
+    fn lexes_invalid_token_valid_begin() {
+        match DatetokenLexer::new("/+-123") {
+            Ok(mut lexer) => {
+                let expected_tokens: &[Token] =
+                    &[Token::SnapBegin, Token::Add, Token::Sub, Token::Number(123)];
+                for expected_token in expected_tokens.iter() {
+                    let next_token = lexer.next_token();
+                    if next_token.is_some() {
+                        assert_eq!(*expected_token, next_token.unwrap());
+                    } else {
+                        assert!(false, "unexpected token error, want {}", &expected_token);
+                    }
+                }
+            }
+            Err(err) => {
+                assert_eq!(None, Some(err))
+            }
+        }
+    }
+
+    #[test]
+    fn lexes_invalid_token() {
+        match DatetokenLexer::new("asap/+-123") {
+            Ok(mut lexer) => {
+                let expected_tokens: &[Token] = &[
+                    Token::Illegal("asap".to_string()),
+                    Token::SnapBegin,
+                    Token::Add,
+                    Token::Sub,
+                    Token::Number(123),
+                ];
+                for expected_token in expected_tokens.iter() {
+                    let next_token = lexer.next_token();
+                    if next_token.is_some() {
+                        assert_eq!(*expected_token, next_token.unwrap());
+                    } else {
+                        assert!(false, "unexpected token error, want {}", &expected_token);
+                    }
+                }
+            }
+            Err(err) => {
+                assert_eq!(None, Some(err));
+            }
+        }
     }
 }
